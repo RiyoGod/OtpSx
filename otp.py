@@ -1,5 +1,6 @@
 import os
 import asyncio
+import logging
 from telethon import TelegramClient, events, Button
 from telethon.errors import (
     SessionPasswordNeededError, PhoneCodeInvalidError, PhoneCodeExpiredError,
@@ -7,128 +8,128 @@ from telethon.errors import (
 )
 from config import API_ID, API_HASH, OWNER_ID, BOT_TOKEN
 
-print("✅ Import successful. Starting bot...")  # Debug print
+# Enable logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Start bot
+# Initialize bot client
 bot = TelegramClient("bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
-# Dictionary to store login attempts
-login_sessions = {}
+# Store active login requests
+active_logins = {}
 
-# Error logging function
-async def send_error_log(error):
-    try:
-        await bot.send_message(OWNER_ID, f"⚠️ **Error Occurred:**\n\n`{error}`")
-    except Exception as e:
-        print(f"❌ Failed to send error log: {e}")
+async def send_error_log(error_text):
+    """Send error logs to owner."""
+    await bot.send_message(OWNER_ID, f"⚠️ **Error Occurred:**\n\n`{error_text}`")
 
 @bot.on(events.NewMessage(pattern="/start"))
 async def start(event):
-    print(f"⚡ Received /start from {event.sender_id}")  # Debug print
-    
+    """Handle /start command."""
     if event.sender_id != OWNER_ID:
-        await event.reply("🚫 **You are not authorized to use this bot.**")
+        return  # Ignore messages from non-owner users
+    
+    buttons = [
+        Button.inline("🔑 Add Account", b"add_account"),
+        Button.inline("📜 View Sessions", b"view_sessions")
+    ]
+    await event.respond("**🤖 Welcome to the OTP Manager Bot!**\n\nManage multiple Telegram accounts securely.", buttons=buttons)
+
+@bot.on(events.CallbackQuery)
+async def callback_handler(event):
+    """Handle inline button clicks."""
+    if event.sender_id != OWNER_ID:
         return
     
-    await event.reply(
-        "**🚀 Welcome to the Telegram Login Bot!**\n\n"
-        "Click below to login.",
-        buttons=[[Button.text("Login Account", resize=True)]]
-    )
-
-@bot.on(events.NewMessage(pattern="Login Account"))
-async def login_step_1(event):
-    print(f"📩 {event.sender_id} started login process.")  # Debug print
-
-    if event.sender_id != OWNER_ID:
-        await event.respond("🚫 **Only the owner can log in accounts.**")
-        return
-
-    await event.respond("**📞 Send the phone number you want to log in with:**")
+    data = event.data.decode()
+    if data == "add_account":
+        await event.respond("📞 **Send the phone number to login:**")
+        active_logins[event.sender_id] = "waiting_for_number"
+    elif data == "view_sessions":
+        sessions = os.listdir("sessions")
+        if not sessions:
+            await event.respond("❌ **No active sessions found!**")
+        else:
+            session_list = "\n".join(sessions)
+            await event.respond(f"📜 **Active Sessions:**\n\n`{session_list}`")
 
 @bot.on(events.NewMessage)
 async def handle_message(event):
+    """Handle phone number input for login."""
+    if event.sender_id != OWNER_ID:
+        return
+
+    if event.sender_id in active_logins and active_logins[event.sender_id] == "waiting_for_number":
+        phone_number = event.text
+        await event.respond(f"📲 **Logging in with** `{phone_number}`...\nPlease wait.")
+        await login_account(event, phone_number)
+        del active_logins[event.sender_id]
+
+async def login_account(event, phone):
+    """Login process for a new account."""
+    session_name = f"sessions/{phone}.session"
+    client = TelegramClient(session_name, API_ID, API_HASH)
+
     try:
-        text = event.raw_text.strip()
+        await client.connect()
+        if await client.is_user_authorized():
+            await event.respond("✅ **Already logged in!**")
+            return
         
-        if text.startswith("+") and event.sender_id == OWNER_ID:
-            print(f"📞 Received number: {text} from {event.sender_id}")
+        code = await client.send_code_request(phone)
+        await event.respond("📩 **OTP sent! Check your Telegram SMS.**\nReply with the code.")
 
-            if event.sender_id in login_sessions:
-                await event.respond("⚠️ **A login process is already in progress!**")
-                return
-            
-            login_sessions[event.sender_id] = {"phone": text}
-            
-            new_client = TelegramClient(f"sessions/{text}", API_ID, API_HASH)
-            await new_client.connect()
-            
-            if not await new_client.is_user_authorized():
-                code = await new_client.send_code_request(text)
-                await event.respond(f"📩 **OTP sent to `{text}`.**\n\n📥 Send the OTP:")
-                login_sessions[event.sender_id]["client"] = new_client
-            else:
-                await event.respond("✅ **This number is already logged in.**")
-                await new_client.disconnect()
-                del login_sessions[event.sender_id]
+        active_logins[event.sender_id] = {"client": client, "phone": phone}
 
-        elif event.sender_id in login_sessions and "client" in login_sessions[event.sender_id]:
-            client = login_sessions[event.sender_id]["client"]
-            
-            try:
-                await client.sign_in(login_sessions[event.sender_id]["phone"], text)
-                await event.respond("✅ **Login successful!**\n\n🔧 Removing privacy restrictions...")
-                
-                # Remove privacy settings
-                await client(UpdatePrivacyRequest(
-                    key=InputPrivacyKeyPhoneNumber(),
-                    rules=[InputPrivacyValueAllowAll()]
-                ))
-
-                await event.respond("🔓 **Privacy settings disabled!**")
-                del login_sessions[event.sender_id]
-
-            except SessionPasswordNeededError:
-                await event.respond("🔒 **Account has 2-step verification.**\nSend the password:")
-                login_sessions[event.sender_id]["password_needed"] = True
-
-            except PhoneCodeInvalidError:
-                await event.respond("❌ **Invalid OTP! Please send the correct one.**")
-
-            except PhoneCodeExpiredError:
-                await event.respond("⏳ **OTP expired! Restarting login process.**")
-                del login_sessions[event.sender_id]
-
-            except Exception as e:
-                await send_error_log(str(e))
-                del login_sessions[event.sender_id]
-
-        elif event.sender_id in login_sessions and "password_needed" in login_sessions[event.sender_id]:
-            client = login_sessions[event.sender_id]["client"]
-            
-            try:
-                await client.sign_in(password=text)
-                await event.respond("✅ **2-Step Password Accepted!**\n\n🔧 Removing privacy restrictions...")
-                
-                await client(UpdatePrivacyRequest(
-                    key=InputPrivacyKeyPhoneNumber(),
-                    rules=[InputPrivacyValueAllowAll()]
-                ))
-
-                await event.respond("🔓 **Privacy settings disabled!**")
-                del login_sessions[event.sender_id]
-
-            except Exception as e:
-                await send_error_log(str(e))
-                del login_sessions[event.sender_id]
-
-        else:
-            await event.respond("🚫 **Invalid command.** Use `/start` to begin.")
-
+    except PhoneNumberBannedError:
+        await event.respond("🚫 **This phone number is banned! Try another one.**")
+    except PhoneNumberInvalidError:
+        await event.respond("🚫 **Invalid phone number! Please check again.**")
+    except FloodWaitError as e:
+        await event.respond(f"⏳ **Too many attempts! Try again after {e.seconds} seconds.**")
     except Exception as e:
-        print(f"❌ Error: {e}")  # Debug print
-        await send_error_log(str(e))
+        await send_error_log(f"SendCodeRequest Error: {str(e)}")
 
-print("✅ Bot is running. Waiting for messages...")  # Debug print
+@bot.on(events.NewMessage)
+async def handle_otp(event):
+    """Handle OTP input from owner."""
+    if event.sender_id != OWNER_ID:
+        return
 
+    if event.sender_id in active_logins and isinstance(active_logins[event.sender_id], dict):
+        client = active_logins[event.sender_id]["client"]
+        phone = active_logins[event.sender_id]["phone"]
+        code = event.text
+
+        try:
+            await client.sign_in(phone, code)
+            await event.respond("✅ **Login successful!**")
+            del active_logins[event.sender_id]
+        except PhoneCodeInvalidError:
+            await event.respond("❌ **Invalid code! Try again.**")
+        except PhoneCodeExpiredError:
+            await event.respond("⏳ **Code expired! Restart login.**")
+        except SessionPasswordNeededError:
+            await event.respond("🔒 **Account has 2FA enabled! Send the password.**")
+            active_logins[event.sender_id]["2fa"] = True
+        except Exception as e:
+            await send_error_log(f"OTP Error: {str(e)}")
+
+@bot.on(events.NewMessage)
+async def handle_2fa(event):
+    """Handle 2FA password input."""
+    if event.sender_id != OWNER_ID:
+        return
+
+    if event.sender_id in active_logins and active_logins[event.sender_id].get("2fa"):
+        client = active_logins[event.sender_id]["client"]
+        password = event.text
+
+        try:
+            await client.sign_in(password=password)
+            await event.respond("✅ **Login successful with 2FA!**")
+            del active_logins[event.sender_id]
+        except Exception as e:
+            await send_error_log(f"2FA Error: {str(e)}")
+
+print("🚀 Bot is running...")
 bot.run_until_disconnected()
