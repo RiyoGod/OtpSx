@@ -5,11 +5,9 @@ from telethon.errors import (
     SessionPasswordNeededError, PhoneCodeInvalidError, PhoneCodeExpiredError,
     FloodWaitError, PhoneNumberBannedError, UserDeactivatedBanError, PhoneNumberInvalidError
 )
-from telethon.tl.functions.account import UpdatePrivacyRequest
-from telethon.tl.types import InputPrivacyKeyPhoneNumber, InputPrivacyValueAllowAll
+from telethon.tl.functions.account import UpdateProfileRequest
 from telethon.tl.types import InputPrivacyKeyPhoneNumber, InputPrivacyValueAllowAll
 from config import API_ID, API_HASH, OWNER_ID, BOT_TOKEN
-
 SESSION_DIR = "sessions"
 os.makedirs(SESSION_DIR, exist_ok=True)
 
